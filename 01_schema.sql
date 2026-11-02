@@ -1,4 +1,4 @@
--- Учебная база по материалам Workbench. Группа 4-1ИС, Кученков.
+-- База данных «Контора». Группа 4-1ИС, Кученков.
 -- Запускать один раз на разрешённом сервере.
 CREATE DATABASE kont4_1is_kuchenkov CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 USE kont4_1is_kuchenkov;
