@@ -1,0 +1,9 @@
+.venv/
+node_modules/
+deps/
+__pycache__/
+*.pyc
+.env
+mysql_test.log
+check.py
+*.txt.bak

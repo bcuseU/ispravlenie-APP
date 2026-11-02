@@ -1,0 +1,8 @@
+{
+  "name": "kontora-kuchenkov",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Учебная база Контора и REST API",
+  "scripts": { "start": "node server.js" },
+  "dependencies": { "express": "^5.1.0", "mysql2": "^3.14.1" }
+}
