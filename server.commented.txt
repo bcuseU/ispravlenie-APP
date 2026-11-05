@@ -1,0 +1,464 @@
+// Подключаем Express — веб-фреймворк, который принимает HTTP-запросы от браузера и отправляет ответы
+const express = require('express');
+// Подключаем mysql2/promise — драйвер MySQL; версия promise позволяет писать await вместо колбэков
+const mysql = require('mysql2/promise');
+// Подключаем встроенный модуль path — он собирает пути к файлам независимо от операционной системы
+const path = require('path');
+
+// Создаём приложение Express — к этому объекту ниже подключаются обработчики и маршруты
+const app = express();
+// Подключаем middleware express.json: он читает JSON из тела запроса и кладёт результат в req.body
+app.use(express.json());
+// Подключаем раздачу статических файлов: всё из папки static (index.html, app.js) отдаётся браузеру как есть
+// __dirname — папка, где лежит server.js; path.join склеивает её с именем 'static'
+app.use(express.static(path.join(__dirname, 'static')));
+// Создаём пул соединений с MySQL и сохраняем его в db; через db выполняются все SQL-запросы
+const db = mysql.createPool({
+  // Адрес сервера MySQL: берётся из переменной окружения DB_HOST, а если её нет — локальный компьютер
+  host: process.env.DB_HOST || '127.0.0.1',
+  // Порт MySQL: переменные окружения всегда строки, поэтому Number() превращает значение в число
+  port: Number(process.env.DB_PORT || 3306),
+  // Имя пользователя MySQL (по умолчанию root)
+  user: process.env.DB_USER || 'root',
+  // Пароль пользователя MySQL (по умолчанию пустой)
+  password: process.env.DB_PASSWORD || '',
+  // Имя базы данных, с которой работает приложение
+  database: process.env.DB_NAME || 'kont4_1is_kuchenkov',
+  // Кодировка соединения: utf8mb4 корректно передаёт русский текст
+  charset: 'utf8mb4',
+  // Даты из MySQL приходят строками вида '2024-05-01', а не объектами Date (так их понимает <input type="date">)
+  dateStrings: true,
+  // Максимум 5 одновременных соединений в пуле
+  connectionLimit: 5
+});
+
+// Все таблицы и поля описаны заранее; имена из запроса браузера в SQL не подставляются — это защита от SQL-инъекций
+// Вспомогательная функция field создаёт описание одного поля: name — столбец в БД, label — подпись в форме, options — правила
+// ...options копирует в объект все дополнительные свойства (type, required, max, choices, ref)
+const field = (name, label, options = {}) => ({ name, label, ...options });
+// Словарь tables: ключ (firms, staff...) — часть URL, значение — описание таблицы БД
+const tables = {
+  // Раздел «Предприятия»
+  firms: {
+    // Название раздела для интерфейса
+    label: 'Предприятия',
+    // Реальное имя таблицы в MySQL
+    table: 'k_firm',
+    // Первичный ключ таблицы (один столбец)
+    keys: ['firm_num'],
+    // auto: true — ключ генерирует сама MySQL (AUTO_INCREMENT), клиент его не присылает
+    auto: true,
+    // Список полей таблицы
+    fields: [
+      // Номер предприятия — целое число, это ключ
+      field('firm_num', 'Номер', { type: 'int' }),
+      // Название — обязательное, не длиннее 45 символов
+      field('firm_name', 'Название', { required: true, max: 45 }),
+      // Адрес — необязательный, до 45 символов
+      field('firm_addr', 'Адрес', { max: 45 }),
+      // Телефон — необязательный, до 20 символов
+      field('firm_phone', 'Телефон', { max: 20 })
+    ]
+  },
+  // Раздел «Отделы»
+  departments: {
+    // Название раздела для интерфейса
+    label: 'Отделы',
+    // Таблица в MySQL
+    table: 'k_dept',
+    // Первичный ключ
+    keys: ['dept_num'],
+    // Ключ создаёт MySQL
+    auto: true,
+    // Поля таблицы
+    fields: [
+      // Номер отдела — ключ
+      field('dept_num', 'Номер', { type: 'int' }),
+      // Полное название — необязательное, до 45 символов
+      field('dept_full_name', 'Полное название', { max: 45 }),
+      // Краткое название — обязательное, до 10 символов
+      field('dept_short_name', 'Краткое название', { required: true, max: 10 }),
+      // Руководитель — внешний ключ на таблицу сотрудников (ref: 'staff' — выбираем из раздела staff)
+      field('k_staff_staff_num', 'Руководитель', { type: 'int', ref: 'staff' })
+    ]
+  },
+  // Раздел «Сотрудники»
+  staff: {
+    // Название раздела для интерфейса
+    label: 'Сотрудники',
+    // Таблица в MySQL
+    table: 'k_staff',
+    // Первичный ключ
+    keys: ['staff_num'],
+    // Ключ создаёт MySQL
+    auto: true,
+    // Поля таблицы
+    fields: [
+      // Номер сотрудника — ключ
+      field('staff_num', 'Номер', { type: 'int' }),
+      // Имя — обязательное, до 45 символов
+      field('staff_name', 'Имя', { required: true, max: 45 }),
+      // Должность — необязательная, до 45 символов
+      field('staff_post', 'Должность', { max: 45 }),
+      // Дата начала работы — дата формата ГГГГ-ММ-ДД
+      field('staff_hiredate', 'Дата начала', { type: 'date' }),
+      // Дата окончания работы — дата формата ГГГГ-ММ-ДД
+      field('staff_termdate', 'Дата окончания', { type: 'date' }),
+      // Отдел — внешний ключ на таблицу отделов (имя столбца в БД начинается с заглавной K)
+      field('K_dept_dept_num', 'Отдел', { type: 'int', ref: 'departments' })
+    ]
+  },
+  // Раздел «Договоры»
+  contracts: {
+    // Название раздела для интерфейса
+    label: 'Договоры',
+    // Таблица в MySQL
+    table: 'k_contract',
+    // Первичный ключ
+    keys: ['contract_num'],
+    // Ключ создаёт MySQL
+    auto: true,
+    // Поля таблицы
+    fields: [
+      // Номер договора — ключ
+      field('contract_num', 'Номер', { type: 'int' }),
+      // Дата договора — обязательная дата
+      field('contract_date', 'Дата', { type: 'date', required: true }),
+      // Тип договора — обязательный, допускаются только значения A, B или C
+      field('contract_type', 'Тип', { required: true, choices: ['A', 'B', 'C'] }),
+      // Предприятие — обязательный внешний ключ на таблицу предприятий
+      field('k_firm_firm_num', 'Предприятие', { type: 'int', ref: 'firms', required: true }),
+      // Ответственный сотрудник — обязательный внешний ключ на таблицу сотрудников
+      field('k_staff_staff_num', 'Ответственный', { type: 'int', ref: 'staff', required: true })
+    ]
+  },
+  // Раздел «Счета»
+  bills: {
+    // Название раздела для интерфейса
+    label: 'Счета',
+    // Таблица в MySQL
+    table: 'k_bill',
+    // Первичный ключ
+    keys: ['bill_num'],
+    // Ключ создаёт MySQL
+    auto: true,
+    // Поля таблицы
+    fields: [
+      // Номер счёта — ключ
+      field('bill_num', 'Номер', { type: 'int' }),
+      // Дата счёта
+      field('bill_date', 'Дата', { type: 'date' }),
+      // Сумма счёта — десятичное число (до 2 знаков после точки)
+      field('bill_sum', 'Сумма', { type: 'decimal' }),
+      // Срок оплаты — дата
+      field('bill_term', 'Срок оплаты', { type: 'date' }),
+      // Пени — десятичное число
+      field('bill_peni', 'Пени', { type: 'decimal' }),
+      // Договор — обязательный внешний ключ на таблицу договоров
+      field('k_contract_contract_num', 'Договор', { type: 'int', ref: 'contracts', required: true })
+    ]
+  },
+  // У платежей и состава счетов ключ составной: запись определяют два поля вместе
+  // Раздел «Платежи»
+  payments: {
+    // Название раздела для интерфейса
+    label: 'Платежи',
+    // Таблица в MySQL
+    table: 'k_payment',
+    // Составной первичный ключ из двух столбцов; auto нет — оба значения вводит пользователь
+    keys: ['k_bill_bill_num', 'payment_num'],
+    // Поля таблицы
+    fields: [
+      // Счёт — часть ключа и внешний ключ на таблицу счетов
+      field('k_bill_bill_num', 'Счёт', { type: 'int', ref: 'bills', required: true }),
+      // Номер платежа внутри счёта — вторая часть ключа
+      field('payment_num', 'Номер платежа в счёте', { type: 'int', required: true }),
+      // Дата платежа
+      field('payment_date', 'Дата', { type: 'date' }),
+      // Сумма платежа
+      field('payment_sum', 'Сумма', { type: 'decimal' })
+    ]
+  },
+  // Раздел «Прайс-лист»
+  prices: {
+    // Название раздела для интерфейса
+    label: 'Прайс-лист',
+    // Таблица в MySQL
+    table: 'k_price',
+    // Первичный ключ
+    keys: ['price_num'],
+    // Ключ создаёт MySQL
+    auto: true,
+    // Поля таблицы
+    fields: [
+      // Номер позиции — ключ
+      field('price_num', 'Номер', { type: 'int' }),
+      // Название позиции — обязательное, до 45 символов
+      field('price_name', 'Название', { required: true, max: 45 }),
+      // Цена — десятичное число
+      field('price_sum', 'Цена', { type: 'decimal' }),
+      // Тип позиции — допускаются только русские буквы Т или У
+      field('price_type', 'Тип', { choices: ['Т', 'У'] })
+    ]
+  },
+  // Раздел «Состав счетов»
+  items: {
+    // Название раздела для интерфейса
+    label: 'Состав счетов',
+    // Таблица в MySQL (называется k_protokol)
+    table: 'k_protokol',
+    // Составной первичный ключ: счёт + позиция прайса
+    keys: ['k_bill_bill_num', 'k_price_price_num'],
+    // Поля таблицы
+    fields: [
+      // Счёт — часть ключа и внешний ключ на таблицу счетов
+      field('k_bill_bill_num', 'Счёт', { type: 'int', ref: 'bills', required: true }),
+      // Позиция прайса — часть ключа и внешний ключ на таблицу прайс-листа
+      field('k_price_price_num', 'Позиция прайса', { type: 'int', ref: 'prices', required: true }),
+      // Количество — обязательное целое число
+      field('kolvo', 'Количество', { type: 'int', required: true }),
+      // Цена позиции в этом счёте — обязательное десятичное число
+      field('price_sum', 'Цена в счёте', { type: 'decimal', required: true })
+    ]
+  }
+};
+
+// quote оборачивает имя в обратные кавычки (`k_firm`); вызывается только для имён из словаря tables
+const quote = name => '`' + name + '`';
+// Маршрут GET /api/tables: отдаёт браузеру словарь tables в JSON, по нему app.js строит меню, формы и таблицы
+// Этот маршрут стоит выше /api/:section, иначе слово tables было бы принято за название раздела
+app.get('/api/tables', (req, res) => res.json(tables));
+// tableFor находит описание таблицы по части адреса :section (например, /api/firms → firms)
+function tableFor(req, res) {
+  // Object.hasOwn проверяет, что такой ключ действительно есть в tables (а не унаследован от Object); иначе table = null
+  const table = Object.hasOwn(tables, req.params.section) ? tables[req.params.section] : null;
+  // Если таблицы нет в списке — отвечаем браузеру статусом 404 и JSON с текстом ошибки
+  if (!table) res.status(404).json({ error: 'Таблица не найдена' });
+  // Возвращаем описание таблицы (или null, если её нет)
+  return table;
+}
+// keyFor разбирает ключ записи из адреса (:key) в массив чисел; для составного ключа значения идут через запятую
+function keyFor(req, table) {
+  // Например, адрес /api/payments/5,2 даёт '5,2' → части ['5', '2'] (счёт 5, платёж 2)
+  const parts = req.params.key.split(',');
+  // Ошибка, если частей не столько, сколько ключевых столбцов, или любая часть — не цифры, или число больше максимума INT
+  if (parts.length !== table.keys.length || parts.some(x => !/^\d+$/.test(x) || Number(x) > 2147483647)) {
+    // Создаём объект ошибки с понятным текстом
+    const error = new Error('Некорректный номер записи');
+    // Статус 400 (неверный запрос): по нему обработчик ошибок в конце файла поймёт, что ошибка наша
+    error.status = 400;
+    // Прерываем функцию; ошибку подхватит catch в маршруте
+    throw error;
+  }
+  // Превращаем строки в числа: ['5', '2'] → [5, 2]
+  return parts.map(Number);
+}
+// valuesFor проверяет данные из тела запроса и возвращает пары [имя поля, значение] для SQL; editing = true при изменении записи
+function valuesFor(table, body, editing) {
+  // Тело запроса должно быть объектом: не пустым, не массивом
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    // Создаём ошибку
+    const e = new Error('Ожидается объект с данными');
+    // Статус 400 — ошибка клиента
+    e.status = 400;
+    // Выбрасываем ошибку
+    throw e;
+  }
+  // Массив result накапливает пары [имя поля, значение]
+  const result = [];
+  // Проходим по полям из описания таблицы — лишние поля из запроса игнорируются
+  for (const f of table.fields) {
+    // Пропускаем ключ, если MySQL создаёт его сама (auto), и вообще любой ключ при изменении записи (ключ менять нельзя)
+    if ((table.auto && table.keys.includes(f.name)) || (editing && table.keys.includes(f.name))) continue;
+    // Берём присланное значение этого поля из req.body
+    let value = body[f.name];
+    // Отсутствующее, null и пустая строка считаются «значения нет» → null
+    if (value === undefined || value === null || value === '') value = null;
+    // У строки убираем пробелы по краям; если после этого пусто — тоже null
+    if (typeof value === 'string') value = value.trim() || null;
+    // Если поле обязательное, а значения нет — ошибка
+    if (f.required && value === null) {
+      // Создаём ошибку с названием поля
+      const e = new Error('Заполните поле «' + f.label + '»');
+      // Статус 400
+      e.status = 400;
+      // Выбрасываем ошибку
+      throw e;
+    }
+    // Если значение есть — проверяем его
+    if (value !== null) {
+      // Допускаются только строки и числа (объекты, массивы, true/false — нельзя)
+      if (typeof value !== 'string' && typeof value !== 'number') {
+        // Создаём ошибку
+        const e = new Error('Некорректное значение поля «' + f.label + '»');
+        // Статус 400
+        e.status = 400;
+        // Выбрасываем ошибку
+        throw e;
+      }
+      // Приводим значение к строке, чтобы проверять числа и даты регулярными выражениями
+      value = String(value);
+      // Ошибка, если нарушено хотя бы одно из условий ниже
+      if (
+        // Слишком длинное значение (больше max символов)
+        (f.max && value.length > f.max) ||
+        // Значения нет в списке допустимых (choices)
+        (f.choices && !f.choices.includes(value)) ||
+        // Целое число: только цифры и не больше максимума INT
+        (f.type === 'int' && (!/^\d+$/.test(value) || Number(value) > 2147483647)) ||
+        // Десятичное число: до 7 цифр, после точки до 2 цифр
+        (f.type === 'decimal' && !/^\d{1,7}(\.\d{1,2})?$/.test(value)) ||
+        // Дата строго в формате ГГГГ-ММ-ДД
+        (f.type === 'date' && !/^\d{4}-\d{2}-\d{2}$/.test(value))
+      ) {
+        // Создаём ошибку с названием поля
+        const e = new Error('Проверьте поле «' + f.label + '»');
+        // Статус 400
+        e.status = 400;
+        // Выбрасываем ошибку
+        throw e;
+      }
+    }
+    // Добавляем проверенную пару [имя поля, значение] в результат
+    result.push([f.name, value]);
+  }
+  // Возвращаем все пары для INSERT или UPDATE
+  return result;
+}
+// where строит условие поиска по ключу: для одного ключа `firm_num` = ?, для составного — `a` = ? AND `b` = ?
+// Знаки ? — места для значений, которые db.execute подставит отдельно (это защищает от SQL-инъекций)
+const where = table => table.keys.map(k => quote(k) + ' = ?').join(' AND ');
+// GET /api/:section — получить все записи таблицы (:section берётся из адреса, например /api/firms)
+app.get('/api/:section', async (req, res, next) => {
+  // Ищем описание таблицы по адресу
+  const t = tableFor(req, res);
+  // Если таблицы нет, ответ 404 уже отправлен — выходим
+  if (!t) return;
+  // try/catch ловит ошибки базы данных
+  try {
+    // Выполняем SELECT всех строк, сортируем по ключу; db.query используется, потому что значений для подстановки нет
+    // [rows] — деструктуризация: из результата берём первый элемент (массив строк)
+    const [rows] = await db.query('SELECT * FROM ' + quote(t.table) + ' ORDER BY ' + t.keys.map(quote).join(', '));
+    // Отправляем строки браузеру как JSON
+    res.json(rows);
+  } catch (e) {
+    // Передаём ошибку обработчику ошибок в конце файла
+    next(e);
+  }
+});
+// GET /api/:section/:key — получить одну запись по ключу
+app.get('/api/:section/:key', async (req, res, next) => {
+  // Ищем описание таблицы по адресу
+  const t = tableFor(req, res);
+  // Если таблицы нет, ответ 404 уже отправлен — выходим
+  if (!t) return;
+  // try/catch ловит ошибки проверки ключа и базы данных
+  try {
+    // execute выполняет подготовленный запрос: ? заменяются значениями ключа из keyFor, отдельно от текста SQL
+    const [rows] = await db.execute('SELECT * FROM ' + quote(t.table) + ' WHERE ' + where(t), keyFor(req, t));
+    // Если строк нет — отвечаем 404
+    if (!rows.length) return res.status(404).json({ error: 'Запись не найдена' });
+    // Отправляем найденную запись (первую и единственную строку) как JSON
+    res.json(rows[0]);
+  } catch (e) {
+    // Передаём ошибку обработчику ошибок
+    next(e);
+  }
+});
+// POST /api/:section — проверить данные из формы и добавить запись через INSERT
+app.post('/api/:section', async (req, res, next) => {
+  // Ищем описание таблицы по адресу
+  const t = tableFor(req, res);
+  // Если таблицы нет, ответ 404 уже отправлен — выходим
+  if (!t) return;
+  // try/catch ловит ошибки проверки и базы данных
+  try {
+    // Проверяем req.body (JSON из формы) и получаем пары [поле, значение]; false — это добавление, не изменение
+    const v = valuesFor(t, req.body, false);
+    // Выполняем INSERT; [r] — объект с результатом (insertId, affectedRows)
+    const [r] = await db.execute(
+      // Текст запроса: INSERT INTO `таблица` (`поле1`, `поле2`) VALUES (?, ?) — столько ?, сколько полей
+      'INSERT INTO ' + quote(t.table) + ' (' + v.map(x => quote(x[0])).join(', ') + ') VALUES (' + v.map(() => '?').join(', ') + ')',
+      // Значения для ? — вторые элементы пар, в том же порядке
+      v.map(x => x[1])
+    );
+    // Статус 201 (создано) и JSON: для таблиц с auto возвращаем новый номер из MySQL, иначе — значения ключа из тела запроса
+    res.status(201).json({ message: 'Запись добавлена', id: t.auto ? r.insertId : t.keys.map(k => req.body[k]) });
+  } catch (e) {
+    // Передаём ошибку обработчику ошибок
+    next(e);
+  }
+});
+// PUT /api/:section/:key — найти запись по ключу и изменить её через UPDATE
+app.put('/api/:section/:key', async (req, res, next) => {
+  // Ищем описание таблицы по адресу
+  const t = tableFor(req, res);
+  // Если таблицы нет, ответ 404 уже отправлен — выходим
+  if (!t) return;
+  // try/catch ловит ошибки проверки и базы данных
+  try {
+    // Разбираем ключ из адреса в массив чисел
+    const key = keyFor(req, t);
+    // Проверяем тело запроса; true — это изменение, поэтому ключевые поля пропускаются
+    const v = valuesFor(t, req.body, true);
+    // Проверяем, что запись существует: SELECT 1 возвращает строку, если запись найдена
+    const [found] = await db.execute('SELECT 1 FROM ' + quote(t.table) + ' WHERE ' + where(t), key);
+    // Если записи нет — отвечаем 404
+    if (!found.length) return res.status(404).json({ error: 'Запись не найдена' });
+    // Выполняем UPDATE
+    await db.execute(
+      // Текст запроса: UPDATE `таблица` SET `поле1` = ?, `поле2` = ? WHERE условие по ключу
+      'UPDATE ' + quote(t.table) + ' SET ' + v.map(x => quote(x[0]) + ' = ?').join(', ') + ' WHERE ' + where(t),
+      // Значения для ?: сначала новые значения полей, затем значения ключа для WHERE
+      [...v.map(x => x[1]), ...key]
+    );
+    // Сообщаем браузеру об успехе
+    res.json({ message: 'Запись изменена' });
+  } catch (e) {
+    // Передаём ошибку обработчику ошибок
+    next(e);
+  }
+});
+// DELETE /api/:section/:key — удалить запись по ключу
+app.delete('/api/:section/:key', async (req, res, next) => {
+  // Ищем описание таблицы по адресу
+  const t = tableFor(req, res);
+  // Если таблицы нет, ответ 404 уже отправлен — выходим
+  if (!t) return;
+  // try/catch ловит ошибки проверки и базы данных
+  try {
+    // Выполняем DELETE с условием по ключу; [r] — результат с полем affectedRows
+    const [r] = await db.execute('DELETE FROM ' + quote(t.table) + ' WHERE ' + where(t), keyFor(req, t));
+    // affectedRows = 0 означает, что удалять было нечего — отвечаем 404
+    if (!r.affectedRows) return res.status(404).json({ error: 'Запись не найдена' });
+    // Сообщаем браузеру об успехе
+    res.json({ message: 'Запись удалена' });
+  } catch (e) {
+    // Передаём ошибку обработчику ошибок (например, если на запись ссылаются другие таблицы)
+    next(e);
+  }
+});
+// Обработчик ошибок: Express узнаёт его по четырём параметрам; сюда приходит всё, что передано через next(e)
+app.use((err, req, res, next) => {
+  // Если у ошибки есть status — это наша ошибка проверки (400), отправляем её текст браузеру
+  if (err.status) return res.status(err.status).json({ error: err.message });
+  // Код MySQL 1451: на запись ссылаются другие таблицы, удалить нельзя (409 — конфликт)
+  if (err.errno === 1451) return res.status(409).json({ error: 'Удаление невозможно: на запись ссылаются другие данные. Сначала измените или удалите связанные записи.' });
+  // Код MySQL 1452: указанной связанной записи нет — нарушен внешний ключ
+  if (err.errno === 1452) return res.status(400).json({ error: 'Связанная запись не найдена. Обновите страницу и выберите существующее значение.' });
+  // Код MySQL 1062: такой ключ или уникальное значение уже есть (например, сотрудник уже руководит другим отделом)
+  if (err.errno === 1062) return res.status(409).json({ error: 'Запись с таким ключом уже существует, либо этот сотрудник уже руководит другим отделом.' });
+  // Коды 1048, 1264, 1292, 1366, 1406: MySQL не принял данные (NULL в обязательном поле, число вне диапазона, неверная дата и т.п.)
+  if ([1048, 1264, 1292, 1366, 1406].includes(err.errno)) return res.status(400).json({ error: 'MySQL не принял данные. Проверьте значения полей.' });
+  // Любую другую ошибку записываем в консоль сервера, чтобы клиент не видел технических подробностей
+  console.error(err.message);
+  // Клиенту отправляем общее сообщение со статусом 503 (сервис недоступен)
+  res.status(503).json({ error: 'Ошибка подключения или запроса к MySQL. Проверьте сервер и настройки.' });
+});
+// Порт сервера: из переменной окружения PORT, иначе 5000
+const port = Number(process.env.PORT || 5000);
+// require.main === module — условие истинно, только если файл запущен напрямую (node server.js), а не подключён из другого файла
+// app.listen запускает сервер на 127.0.0.1 (доступен только с этого компьютера) и пишет адрес в консоль
+if (require.main === module) app.listen(port, '127.0.0.1', () => console.log('Приложение: http://127.0.0.1:' + port));
+// Экспортируем app и db, чтобы другие файлы (например, тесты) могли использовать приложение и подключение к БД
+module.exports = { app, db };
